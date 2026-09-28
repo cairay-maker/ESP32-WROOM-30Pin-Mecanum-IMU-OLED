@@ -17,11 +17,18 @@ void MotorDrive::setMotorSpeed(MX1508& m, int speed) {
 }
 
 void MotorDrive::drive(int fl, int fr, int rl, int rr) {
-    _fl = fl; _fr = fr; _rl = rl; _rr = rr;
+    _fl = fl; 
+    _fr = fr; 
+    _rl = rl; 
+    _rr = rr;
+
+    // Left motors use positive sign
     setMotorSpeed(motorFL, _fl);
-    setMotorSpeed(motorFR, _fr);
     setMotorSpeed(motorRL, _rl);
-    setMotorSpeed(motorRR, _rr);
+
+    // Right motors are physically mirrored, so negate input sign
+    setMotorSpeed(motorFR, -_fr);
+    setMotorSpeed(motorRR, -_rr);
 }
 
 void MotorDrive::stop() {

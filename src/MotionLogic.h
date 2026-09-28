@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "hal/ESPNowHandler.h"
+#include "PacketData.h"
 
 class MotionLogic {
 public:

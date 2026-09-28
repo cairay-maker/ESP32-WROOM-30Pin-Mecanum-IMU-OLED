@@ -1,47 +1,61 @@
-# Project: ESP32-WROOM-30Pin-Mecanum-IMU-OLED
+Script to Concatenate all the code for Gemini
+    find src -type f ! -name "AllCode.txt" -exec sh -c 'echo "=== $1 ==="; cat "$1"; echo' _ {} \; > AllCode.txt	
 
-## Overview
-A dual-phase robotics project utilizing an ESP32 to drive a 4-wheel Mecanum platform via ESP-NOW remote control, evolving into a self-balancing inverted pendulum robot.
+Project: ESP32-WROOM-30Pin-Mecanum-IMU-OLED
 
-## Hardware Stack
-- **MCU:** ESP32-WROOM-30 Pin (Dual Core) https://lastminuteengineers.com/esp32-pinout-reference/
-- **Display:** 0.96" OLED (SSD1306 I2C)
-- **IMU:** MPU-6050 (6-Axis)
-- **Drivers:** 2x MX1508 (Mini L298N)
-- **Motors:** 4x N20 (60 RPM) with 48mm Mecanum Wheels
 
-## Pin Mapping
+Hardware Overview & System ArchitectureController: 
+    ESP32 NodeMCU (38-Pin)
+    Wireless Protocol: ESP-NOW (for real-time remote controller telemetry)
+    Display: 1.5" SSD1327 OLED ($128 \times 128$, I2C)
+    IMU: Adafruit LSM6DS (6-DOF, I2C)
+    Servo Driver: PCA9685 16-Channel PWM Driver (I2C)
+    Motor Drivers: 2x MX1508 / Mini L298N (Dual H-Bridge)
+    AI Camera / Host Link: Hardware UART2 (HuskyLens / Raspberry Pi interface)
+    Wheels: 80mm large mecanum wheels
+    Servo Motor: MG995 x 4 for leg joints
 
-GPIO 6 to 11: Internal Flash Memory. If you connect anything here, the ESP32 won't boot.
-GPIO 0: Strapping pin (used to enter "Download Mode"). If held LOW at startup, the code won't run.
-GPIO 2: Often connected to the onboard LED. Best to leave it as a status light.
-GPIO 34, 35, 36, 39: Input-Only. These cannot output a PWM signal to a motor driver.
+ESP-NOW & ADC Conflicts: 
+    Utilizing Wi-Fi / ESP-NOW disables ESP32 ADC2 (GPIOs 0, 2, 4, 12–15, 25–27) for analog inputs. All analog sensors (e.g., battery voltage dividers) are mapped exclusively to ADC1 pins (GPIOs 32–39).	
 
-- I2C (OLED/IMU): SDA:21, SCL:22
-- Motors FR: 13, 12 (+,-)
-- Motors FL: 14, 27 (+,-)
-- Motors RR: 26, 25 (+,-)
-- Motors RL: 33, 32 (+,-)
+    GPIO 6 to 11: Internal Flash Memory. If you connect anything here, the ESP32 won't boot.
+    GPIO 0: Strapping pin (used to enter "Download Mode"). If held LOW at startup, the code won't run.
+    GPIO 2: Often connected to the onboard LED. Best to leave it as a status light.
+    GPIO 34, 35, 36, 39: Input-Only. These cannot output a PWM signal to a motor driver.
 
-Project Plan: Phase 1 (Mecanum Control)
-To keep the momentum, we will follow a "Software First" approach using the same packet structure from your Controller project.
+GPIO Pin	Function / Target Component	Direction / Notes								
+    GPIO 21	I2C SDA (OLED, IMU, PCA9685, Color Sensor)	Shared I2C Data Bus								
+    GPIO 22	I2C SCL (OLED, IMU, PCA9685, Color Sensor)	Shared I2C Clock Bus								
+    GPIO 16	UART2 RX2 (HuskyLens TX / Raspberry Pi TX)	Hardware Serial Receive								
+    GPIO 17	UART2 TX2 (HuskyLens RX / Raspberry Pi RX)	Hardware Serial Transmit								
+    
+Motor Drive:
 
-Week 1: Foundations & Communication
-Step 1: Setup the platformio.ini with FS_MX1508, Adafruit MPU6050, and Adafruit SSD1306.
+    
+    
+    GPIO 18	Motor FR - IN4 Output / PWM	
+    GPIO 19	Motor FR - IN3 Output / PWM
 
-Step 2: Port your PacketData struct to the Receiver code.
+    GPIO 14	Motor RR - IN2 Output / PWM
+    GPIO 27	Motor RR - IN1 Output / PWM
 
-Step 3: Establish the ESP-NOW "Handshake." Use the OLED to display the X/Y Joystick values being received from your handheld controller.
+    GPIO 26	Motor FL - IN4 Output / PWM
+    GPIO 25	Motor FL - IN3 Output / PWM
 
-Week 2: Kinematics (The "Mecanum" Math)
-Step 4: Implement the Mecanum drive algorithm. This converts Joystick X (Slide), Y (Forward), and Z (Spin) into 4 different motor speeds.
+    GPIO 04	Motor RL - IN2 Output / PWM								
+    GPIO 23	Motor RL - IN1 Output / PWM							
+    								
+PCA9685 Servo Channel Mapping										
+										
+All leg and upper-body servos are offloaded to the PCA9685 via I2C 
+										
+Channel	Assignment	Function								
+    Ch 0	Front-Left Leg	Joint Servo 1								
+    Ch 1	Front-Right Leg	Joint Servo 2								
+    Ch 2	Rear-Left Leg	Joint Servo 3								
+    Ch 3	Rear-Right Leg	Joint Servo 4								
+								
+									
 
-Step 5: Software "Bench Test." Watch the OLED/Serial monitor to ensure the motors think they are spinning the right way before putting it on the floor.
 
-Week 3: Hardware Integration
-Step 6: Wiring and Power. (We will discuss how to power the ESP32 and Motors separately to prevent crashes).
 
-Step 7: First Drive. Tuning the "deadzone" of your handheld joysticks so the robot doesn't crawl away on its own.
-
-Transitioning to Phase 2 (Self-Balance)
-Self-balancing requires very high-speed PID loops. Because we used a Mecanum setup, we will likely "lock" the strafing and treat it as a 2-wheel balancer later, or use the 4 wheels to create a wider, more stable balancing base.

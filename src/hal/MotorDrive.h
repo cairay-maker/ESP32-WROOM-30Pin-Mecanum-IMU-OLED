@@ -4,15 +4,18 @@
 #include <Arduino.h>
 #include <FS_MX1508.h>
 
-// Your Final Pin Assignments
-#define FR_F 13
-#define FR_R 12
-#define FL_F 14
-#define FL_R 27
-#define RR_F 26
-#define RR_R 25
-#define RL_F 33
-#define RL_R 32
+// Your Active GPIO Pin Assignments
+#define FR_F 19  // IN3
+#define FR_R 18  // IN4
+
+#define RR_F 27  // IN1
+#define RR_R 14  // IN2
+
+#define FL_F 25  // IN3
+#define FL_R 26  // IN4
+
+#define RL_F 23  // IN1
+#define RL_R 4   // IN2 (GPIO 04)
 
 class MotorDrive {
 public:
@@ -21,7 +24,7 @@ public:
     void drive(int fl, int fr, int rl, int rr);
     void stop();
 
-    // Getters for OLED telemetry
+    // Getters for OLED / telemetry
     int getFLSpeed() { return _fl; }
     int getFRSpeed() { return _fr; }
     int getRLSpeed() { return _rl; }

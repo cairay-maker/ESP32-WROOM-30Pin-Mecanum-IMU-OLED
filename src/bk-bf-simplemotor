@@ -6,14 +6,12 @@
 #include "hal/ServoHandler.h"
 #include "hal/ESPNowHandler.h"
 #include "hal/MotorDrive.h"
-#include "MotionLogic.h"
 
 ServoHandler legServos;
 ESPNowHandler radio;
 MotorDrive motors;
-MotionLogic logic;
 
-// Deadband tracker for height and split
+// Tracking for remote input deadbands
 float lastHeightOffset = -999.0f;
 float lastSplitOffset  = -999.0f;
 
@@ -29,7 +27,7 @@ void setup() {
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
 
-    // 2. Shared I2C Bus for PCA9685 Servos
+    // 2. Shared I2C Bus for PCA9685 Servos (SDA: 21, SCL: 22)
     Wire.begin(21, 22);
     Wire.setClock(100000);
 
@@ -40,28 +38,37 @@ void setup() {
     motors.init();
 
     Serial.println(">>> System Ready.");
+
+    // --- MOTOR TEST DIRECTION ROUTINE ---
+    // Runs all four motors at a slow PWM speed (100) for 5 seconds
+    Serial.println("\n-------------------------------------------");
+    Serial.println(">>> STARTING MOTOR DIRECTION TEST (SPEED = 100)");
+    Serial.println(">>> Observe each wheel and note if it moves FORWARD or BACKWARD.");
+    Serial.println("-------------------------------------------\n");
+
+    motors.drive(100, 100, 100, 100); // Drive FL, FR, RL, RR at speed 100
+    delay(10000);                      // Run for 5 seconds
+    motors.stop();
+
+    Serial.println(">>> TEST COMPLETE: Motors Stopped.");
+    Serial.println(">>> Please report which wheels moved Forward and which moved Backward.");
 }
 
 void loop() {
-    // 1. Interleaved non-blocking servo movement updates
+    // 1. Non-blocking interleaved leg updates
     legServos.update();
 
-    // 2. Process USB Serial keyboard inputs
+    // 2. Process USB Serial commands (keyboard overrides)
     legServos.processSerialCommands();
 
-    // 3. Process Remote Control Data
+    // 3. Process Wireless ESP-NOW Remote Commands
     if (radio.isConnected()) {
         const PacketData& remote = radio.getLatestPacket();
 
-        // --- A. MECANUM WHEEL DRIVE LOGIC ---
-        MotionLogic::CalculatedSpeeds speeds = logic.process(remote);
-        motors.drive(speeds.fl, speeds.fr, speeds.rl, speeds.rr);
-
-        // --- B. SERVO POSE CONTROL (pL: Height, pM: Split) ---
         float rawPL = remote.pL;
         float rawPM = remote.pM;
 
-        // Snap-to-Neutral around 0.0 to eliminate jitter
+        // Snap-to-Neutral around 0.0 to prevent jitter
         if (abs(rawPL) < 0.04f) rawPL = 0.0f;
         if (abs(rawPM) < 0.04f) rawPM = 0.0f;
 
@@ -75,11 +82,8 @@ void loop() {
 
             legServos.applyPoseOffsets(targetHeightOffset, targetSplitOffset);
 
-            Serial.printf(">>> REMOTE POSE: Height = %+.0f deg | Split = %+.0f deg\n", 
+            Serial.printf(">>> REMOTE INPUT: Height = %+.0f deg | Split = %+.0f deg\n", 
                           targetHeightOffset, targetSplitOffset);
         }
-    } else {
-        // Safety stop if remote disconnects
-        motors.stop();
     }
 }

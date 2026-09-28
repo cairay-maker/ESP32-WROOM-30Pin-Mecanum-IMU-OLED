@@ -3,14 +3,13 @@
 #include <Arduino.h>
 
 bool IMUReader::begin() {
-    Wire.begin(21, 22);
-    Wire.setClock(400000); 
 
-    if (!mpu.begin()) return false;
+    Wire.setClock(400000);
 
-    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-    mpu.setGyroRange(MPU6050_RANGE_1000_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ); 
+    if (!lsm.begin_I2C()) return false;
+
+    lsm.setAccelRange(LSM6DS_ACCEL_RANGE_4_G);
+    lsm.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
 
     lastMicros = micros();
     return true;
@@ -22,7 +21,7 @@ void IMUReader::calibrate() {
 
     for (int i = 0; i < samples; i++) {
         sensors_event_t a, g, t;
-        mpu.getEvent(&a, &g, &t);
+        lsm.getEvent(&a, &g, &t);
         
         // Calculate raw angles for initial offset
         pSum += atan2(a.acceleration.y, a.acceleration.z) * 57.2958f;
@@ -46,7 +45,7 @@ void IMUReader::calibrate() {
 
 void IMUReader::update() {
     sensors_event_t accel, gyro, temp;
-    mpu.getEvent(&accel, &gyro, &temp);
+    lsm.getEvent(&accel, &gyro, &temp);
 
     ax = accel.acceleration.x; 
     ay = accel.acceleration.y; 

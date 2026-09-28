@@ -1,0 +1,585 @@
+=== src/main.cpp ===
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include "hal/MotorDrive.h"
+#include "hal/IMUReader.h"
+#include "hal/OLEDHandler.h"
+#include "hal/ESPNowHandler.h"
+#include "MotionLogic.h"
+
+MotorDrive motors;
+IMUReader imu;
+OLEDHandler oled;
+ESPNowHandler radio;
+MotionLogic logic;
+
+void setup() {
+    Serial.begin(115200);
+    
+    // --- POWER UP WIFI & LOCK CHANNEL 1 ---
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
+    // Initialize shared I2C bus for OLED and IMU before display startup
+    Wire.begin(21, 22);
+    Wire.setClock(400000);
+
+    motors.init();
+    oled.begin();
+    radio.begin(); 
+    
+    if (imu.begin()) {
+        oled.clearScreen();
+        oled.drawCenteredText("CALIBRATING...", 28, 1);
+        oled.updateDisplay();
+        imu.calibrate();
+    }
+}
+
+void loop() {
+    imu.update();
+    
+    bool connected = radio.isConnected();
+    
+    if (connected) {
+        const PacketData& remote = radio.getLatestPacket();
+        MotionLogic::CalculatedSpeeds speeds = logic.process(remote);
+        motors.drive(speeds.fl, speeds.fr, speeds.rl, speeds.rr);
+    } else {
+        motors.stop();
+    }
+    
+    static unsigned long lastUpdate = 0;
+    if (millis() - lastUpdate > 66) { // 15 FPS
+        oled.clearScreen();
+        oled.drawWifiIcon(connected);
+        oled.drawRobotData(
+            imu.getPitch(), imu.getRoll(),
+            motors.getFLSpeed(), motors.getFRSpeed(),
+            motors.getRLSpeed(), motors.getRRSpeed()
+        );
+        oled.drawBalanceBar(imu.getRoll());
+        oled.updateDisplay();
+        lastUpdate = millis();
+    }
+}
+=== src/MotionLogic.cpp ===
+#include "MotionLogic.h"
+
+MotionLogic::MotionLogic() {}
+
+// Note the return type uses MotionLogic:: to tell the compiler where the struct is
+MotionLogic::CalculatedSpeeds MotionLogic::process(const PacketData& joyData) {
+    CalculatedSpeeds s = {0, 0, 0, 0};
+
+    // Mapping normalized float (-1.0 to 1.0) to your legacy 500-scale
+    float rawX = joyData.rx * 500.0f; 
+    float rawY = joyData.ry * 500.0f;
+
+    // Apply Deadzone
+    if (abs(rawX) <= DEAD_ZONE) rawX = 0;
+    if (abs(rawY) <= DEAD_ZONE) rawY = 0;
+
+    float x = rawX * SCALE;
+    float y = rawY * SCALE;
+
+    // INNER ZONE: Forward/Backward or Point Turns
+    if (abs(rawX) <= INNER_ZONE_LIMIT && abs(rawY) <= INNER_ZONE_LIMIT) {
+        if (abs(rawY) > DEAD_ZONE) {
+            s.fl = s.fr = s.rl = s.rr = (int)y;
+        } 
+        else if (abs(rawX) > DEAD_ZONE) {
+            // Point Turn Logic
+            s.fl = s.rl = (int)x;
+            s.fr = s.rr = (int)-x;
+        }
+    } 
+    // OUTER ZONE: Full Mecanum movement
+    else {
+        float rot = (abs(rawY) > DEAD_ZONE) ? 0 : x * 0.2f;
+        s.fl = (int)(y + x + rot);
+        s.fr = (int)(y - x - rot);
+        s.rl = (int)(y - x + rot);
+        s.rr = (int)(y + x - rot);
+    }
+
+    // Constraints
+    s.fl = constrain(s.fl, -255, 255);
+    s.fr = constrain(s.fr, -255, 255);
+    s.rl = constrain(s.rl, -255, 255);
+    s.rr = constrain(s.rr, -255, 255);
+
+    return s;
+}
+=== src/hal/IMUReader.cpp ===
+#include "IMUReader.h"
+#include <Wire.h>
+#include <Arduino.h>
+
+bool IMUReader::begin() {
+    Wire.begin(21, 22);
+    Wire.setClock(400000);
+
+    if (!lsm.begin_I2C()) return false;
+
+    lsm.setAccelRange(LSM6DS_ACCEL_RANGE_4_G);
+    lsm.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
+
+    lastMicros = micros();
+    return true;
+}
+
+void IMUReader::calibrate() {
+    float pSum = 0, rSum = 0, gxb = 0, gyb = 0, gzb = 0;
+    const int samples = 100;
+
+    for (int i = 0; i < samples; i++) {
+        sensors_event_t a, g, t;
+        lsm.getEvent(&a, &g, &t);
+        
+        // Calculate raw angles for initial offset
+        pSum += atan2(a.acceleration.y, a.acceleration.z) * 57.2958f;
+        rSum += atan2(a.acceleration.x, a.acceleration.z) * 57.2958f;
+        gxb += g.gyro.x;
+        gyb += g.gyro.y;
+        gzb += g.gyro.z;
+        delay(2); 
+    }
+
+    pitchOffset = pSum / (float)samples;
+    rollOffset = rSum / (float)samples;
+    gxBias = gxb / (float)samples;
+    gyBias = gyb / (float)samples;
+    gzBias = gzb / (float)samples;
+
+    pitch = 0; 
+    roll = 0;
+    filteredYawRate = 0;
+}
+
+void IMUReader::update() {
+    sensors_event_t accel, gyro, temp;
+    lsm.getEvent(&accel, &gyro, &temp);
+
+    ax = accel.acceleration.x; 
+    ay = accel.acceleration.y; 
+    az = accel.acceleration.z;
+    
+    // 1. Gyro Bias Correction
+    gx = gyro.gyro.x - gxBias;
+    gy = gyro.gyro.y - gyBias;
+    gz = gyro.gyro.z - gzBias;
+
+    unsigned long currentMicros = micros();
+    float dt = (currentMicros - lastMicros) / 1000000.0f;
+    lastMicros = currentMicros;
+
+    // 2. Convert Gyro to Degrees/sec
+    // Note: Signs may need flipping depending on sensor orientation relative to chassis
+    float gx_deg = gx * 57.2958f; 
+    float gy_deg = gy * 57.2958f;
+    float gz_deg = gz * 57.2958f;
+
+    // 3. Accelerometer Angles
+    float accPitch = atan2(ay, az) * 57.2958f;
+    float accRoll  = atan2(ax, az) * 57.2958f;
+
+    // 4. Complementary Filter
+    pitch = alpha * (pitch + gx_deg * dt) + (1.0f - alpha) * accPitch;
+    roll  = alpha * (roll + gy_deg * dt) + (1.0f - alpha) * accRoll;
+
+    // 5. Yaw Rate Smoothing
+    filteredYawRate = (filteredYawRate * (1.0f - yawAlpha)) + (gz_deg * yawAlpha);
+}
+=== src/hal/ESPNowHandler.cpp ===
+#include "hal/ESPNowHandler.h"
+
+// Initialize static members
+PacketData ESPNowHandler::latestPacket;
+uint32_t ESPNowHandler::recvCount = 0;
+uint32_t ESPNowHandler::lastRecvTime = 0;
+
+ESPNowHandler::ESPNowHandler() {
+    memset(&latestPacket, 0, sizeof(PacketData));
+}
+
+void ESPNowHandler::begin() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("!!! ESP-NOW: Initialization Failed");
+        return;
+    }
+
+    // Register receive callback
+    esp_now_register_recv_cb(onDataRecv);
+    Serial.println(">>> ESP-NOW: Receiver Ready");
+}
+
+void ESPNowHandler::onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    if (len == sizeof(PacketData)) {
+        memcpy(&latestPacket, incomingData, sizeof(PacketData));
+        recvCount++;
+        lastRecvTime = millis();
+    }
+}
+
+bool ESPNowHandler::isConnected() {
+    // If we haven't received a packet in 500ms, consider it disconnected
+    return (millis() - lastRecvTime < 500);
+}
+=== src/hal/IMUReader.h ===
+#ifndef IMUREADER_H
+#define IMUREADER_H
+
+#include <Adafruit_LSM6DS3.h>
+#include <Adafruit_Sensor.h>
+
+class IMUReader {
+public:
+    bool begin();
+    void update();
+    void calibrate();
+
+    // Raw Accel and Gyro Data
+    float ax, ay, az, gx, gy, gz;
+
+    // Filtered Output (Calculated)
+    float getPitch() const { return pitch - pitchOffset; }
+    float getRoll() const  { return roll - rollOffset; }
+    float getYawRate() const { return filteredYawRate; } 
+
+    // Raw comparison helpers (Restored for consistency)
+    float getRawPitch() const { return (atan2(ay, az) * 57.2958f) - pitchOffset; }
+    float getRawRoll() const  { return (atan2(ax, az) * 57.2958f) - rollOffset; }
+
+private:
+    Adafruit_LSM6DS3 lsm;
+    float pitch = 0, roll = 0;
+    float filteredYawRate = 0; 
+    unsigned long lastMicros;
+    
+    const float alpha = 0.96f;      
+    const float yawAlpha = 0.15f;   
+
+    // Calibration Offsets
+    float pitchOffset = 0;
+    float rollOffset = 0;
+    float gxBias = 0, gyBias = 0, gzBias = 0;
+};
+
+#endif
+=== src/hal/ESPNowHandler.h ===
+#ifndef ESPNOW_HANDLER_H
+#define ESPNOW_HANDLER_H
+
+#include <Arduino.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+// The exact data structure sent by your Controller
+typedef struct {
+    float lx, ly, rx, ry;    // Joysticks (-1.0 to 1.0)
+    float pL, pM, pR;        // Potentiometers
+    float roll, pitch, yaw;  // IMU Data
+    int16_t encL, encR;      // Encoders
+    uint32_t buttons;        // Button bitmask
+} PacketData;
+
+class ESPNowHandler {
+public:
+    ESPNowHandler();
+    
+    void begin();
+    
+    // Data access
+    bool isConnected();
+    const PacketData& getLatestPacket() const { return latestPacket; }
+    uint32_t getRecvCount() const { return recvCount; }
+
+private:
+    static PacketData latestPacket; 
+    static uint32_t recvCount;
+    static uint32_t lastRecvTime;
+    
+    // Callback must be static for ESP-NOW
+    static void onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len);
+};
+
+#endif
+=== src/hal/OLEDHandler.h ===
+#ifndef OLED_HANDLER_H
+#define OLED_HANDLER_H
+
+#include <Adafruit_SSD1327.h>
+#include <Adafruit_GFX.h>
+#include <Fonts/TomThumb.h> // The "50% scale" look font
+#include <Wire.h>
+
+class OLEDHandler {
+public:
+    void begin();
+    void clearScreen();
+    void updateDisplay();
+    
+    void drawBalanceBar(float roll);
+    void drawWifiIcon(bool connected);
+    void drawRobotData(float p, float r, int fl, int fr, int rl, int rr);
+    void drawCenteredText(const char* text, int y, int size);
+
+private:
+    Adafruit_SSD1327 display = Adafruit_SSD1327(128, 128, &Wire);
+    const int SCREEN_WIDTH = 128;
+    const int SCREEN_HEIGHT = 128;
+};
+
+#endif
+=== src/hal/MotorDrive.h ===
+#ifndef MOTOR_DRIVE_H
+#define MOTOR_DRIVE_H
+
+#include <Arduino.h>
+#include <FS_MX1508.h>
+
+// Your Final Pin Assignments
+#define FR_F 13
+#define FR_R 12
+#define FL_F 14
+#define FL_R 27
+#define RR_F 26
+#define RR_R 25
+#define RL_F 33
+#define RL_R 32
+
+class MotorDrive {
+public:
+    MotorDrive();
+    void init();
+    void drive(int fl, int fr, int rl, int rr);
+    void stop();
+
+    // Getters for OLED telemetry
+    int getFLSpeed() { return _fl; }
+    int getFRSpeed() { return _fr; }
+    int getRLSpeed() { return _rl; }
+    int getRRSpeed() { return _rr; }
+
+private:
+    MX1508 motorFR, motorFL, motorRR, motorRL;
+    int _fl = 0, _fr = 0, _rl = 0, _rr = 0;
+    void setMotorSpeed(MX1508& m, int speed);
+};
+
+#endif
+=== src/hal/MotorDrive.cpp ===
+#include "hal/MotorDrive.h"
+
+MotorDrive::MotorDrive() : 
+    motorFR(FR_F, FR_R), motorFL(FL_F, FL_R), 
+    motorRR(RR_F, RR_R), motorRL(RL_F, RL_R) {}
+
+void MotorDrive::init() {
+    stop();
+}
+
+void MotorDrive::setMotorSpeed(MX1508& m, int speed) {
+    if (speed == 0) {
+        m.motorStop();
+    } else {
+        m.motorGo(constrain(speed, -255, 255));
+    }
+}
+
+void MotorDrive::drive(int fl, int fr, int rl, int rr) {
+    _fl = fl; _fr = fr; _rl = rl; _rr = rr;
+    setMotorSpeed(motorFL, _fl);
+    setMotorSpeed(motorFR, _fr);
+    setMotorSpeed(motorRL, _rl);
+    setMotorSpeed(motorRR, _rr);
+}
+
+void MotorDrive::stop() {
+    _fl = _fr = _rl = _rr = 0;
+    motorFR.motorStop();
+    motorFL.motorStop();
+    motorRR.motorStop();
+    motorRL.motorStop();
+}
+=== src/hal/OLEDHandler.cpp ===
+#include "OLEDHandler.h"
+
+void OLEDHandler::begin() {
+    if(!display.begin(0x3C)) return;
+    display.clearDisplay();
+    display.setTextColor(SSD1327_WHITE);
+    display.setTextSize(1);
+    display.display();
+}
+
+void OLEDHandler::clearScreen() {
+    display.clearDisplay();
+    display.setFont(NULL);      // Use original system font
+    display.setTextSize(1);
+    display.setCursor(0,0);
+}
+
+void OLEDHandler::updateDisplay() {
+    display.display();
+}
+
+void OLEDHandler::drawWifiIcon(bool connected) {
+    if (connected) {
+        // Graphic bars in the corner
+        display.fillRect(116, 6, 2, 2, SSD1327_WHITE);
+        display.fillRect(120, 4, 2, 4, SSD1327_WHITE);
+        display.fillRect(124, 2, 2, 6, SSD1327_WHITE);
+    } else {
+        display.setCursor(110, 0);
+        display.print("!!"); // Signal "Not Connected" clearly
+    }
+}
+
+void OLEDHandler::drawRobotData(float p, float r, int fl, int fr, int rl, int rr) {
+    display.setCursor(0, 0);
+    display.printf("P: %.1f  R: %.1f", p, r);
+    
+    display.setCursor(0, 10);
+    display.printf("FL:%3d  FR:%3d" , fl, fr);
+    display.setCursor(0, 20);
+    display.printf("RL:%3d  RR:%3d" , rl, rr);
+
+}
+
+void OLEDHandler::drawBalanceBar(float roll) {
+    // Original thin bar at the bottom
+    int barY = 116;
+    int barWidth = 100;
+    int barX = (128 - barWidth) / 2;
+    
+    display.drawRect(barX, barY, barWidth, 7, SSD1327_WHITE);
+    display.drawFastVLine(64, barY - 2, 11, SSD1327_WHITE); // Center notch
+
+    // Sensitivity: 2.0 pixels per degree
+    int ballX = 64 + (int)(roll * 2.0f);
+    ballX = constrain(ballX, barX + 2, barX + barWidth - 4);
+    
+    display.fillCircle(ballX, barY + 3, 2, SSD1327_WHITE);
+}
+
+void OLEDHandler::drawCenteredText(const char* text, int y, int size) {
+    display.setTextSize(size);
+    display.setFont(NULL);
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((128 - w) / 2, y);
+    display.print(text);
+}
+=== src/MotionLogic.h ===
+#ifndef MOTION_LOGIC_H
+#define MOTION_LOGIC_H
+
+#include <Arduino.h>
+#include "hal/ESPNowHandler.h"
+
+class MotionLogic {
+public:
+    // Struct defined inside the class to prevent global scope naming conflicts
+    struct CalculatedSpeeds {
+        int fl, fr, rl, rr;
+    };
+
+    MotionLogic();
+    
+    // Returns the nested struct
+    CalculatedSpeeds process(const PacketData& joyData);
+
+private:
+    const int DEAD_ZONE = 10;
+    const int INNER_ZONE_LIMIT = 495;
+    const float SCALE = 255.0 / 500.0;
+};
+
+#endif
+=== src/README.md ===
+# Project: ESP32-WROOM-30Pin-Mecanum-IMU-OLED
+
+## Overview
+A dual-phase robotics project utilizing an ESP32 to drive a 4-wheel Mecanum platform via ESP-NOW remote control, evolving into a self-balancing inverted pendulum robot.
+
+## Hardware Stack
+- **MCU:** ESP32-WROOM-38 Pin (Dual Core) https://lastminuteengineers.com/esp32-pinout-reference/
+- **Display:** 1.5" 128x128 OLED (SSD1327-compatible I2C)
+- **IMU:** LSM6DS3 (6-Axis)
+- **Servo Driver:** PCA9685 I2C PWM
+- **Drivers:** 2x MX1508 (Mini L298N)
+- **Motors:** 4x N20 (60 RPM) with 48mm Mecanum Wheels
+
+## Pin Mapping
+
+GPIO 6 to 11: Internal Flash Memory. If you connect anything here, the ESP32 won't boot.
+GPIO 0: Strapping pin (used to enter "Download Mode"). If held LOW at startup, the code won't run.
+GPIO 2: Often connected to the onboard LED. Best to leave it as a status light.
+GPIO 34, 35, 36, 39: Input-Only. These cannot output a PWM signal to a motor driver.
+
+- I2C (OLED/IMU): SDA:21, SCL:22
+- Motors FR: 13, 12 (+,-)
+- Motors FL: 14, 27 (+,-)
+- Motors RR: 26, 25 (+,-)
+- Motors RL: 33, 32 (+,-)
+
+Project Plan: Phase 1 (Mecanum Control)
+To keep the momentum, we will follow a "Software First" approach using the same packet structure from your Controller project.
+
+Week 1: Foundations & Communication
+Step 1: Setup the platformio.ini with FS_MX1508, Adafruit LSM6DS3, Adafruit SSD1327, and Adafruit PWM Servo Driver.
+
+Step 2: Port your PacketData struct to the Receiver code.
+
+Step 3: Establish the ESP-NOW "Handshake." Use the OLED to display the X/Y Joystick values being received from your handheld controller.
+
+Week 2: Kinematics (The "Mecanum" Math)
+Step 4: Implement the Mecanum drive algorithm. This converts Joystick X (Slide), Y (Forward), and Z (Spin) into 4 different motor speeds.
+
+Step 5: Software "Bench Test." Watch the OLED/Serial monitor to ensure the motors think they are spinning the right way before putting it on the floor.
+
+Week 3: Hardware Integration
+Step 6: Wiring and Power. (We will discuss how to power the ESP32 and Motors separately to prevent crashes).
+
+Step 7: First Drive. Tuning the "deadzone" of your handheld joysticks so the robot doesn't crawl away on its own.
+
+Transitioning to Phase 2 (Self-Balance)
+Self-balancing requires very high-speed PID loops. Because we used a Mecanum setup, we will likely "lock" the strafing and treat it as a 2-wheel balancer later, or use the 4 wheels to create a wider, more stable balancing base.
+=== src/PacketData.h ===
+#ifndef PACKET_DATA_H
+
+#define PACKET_DATA_H
+
+
+
+#include <Arduino.h>
+
+
+
+struct PacketData {
+
+float lx, ly, rx, ry; // Joysticks (-1.0 to 1.0)
+
+float pL, pM, pR; // Potentiometers
+
+float roll, pitch, yaw; // IMU Data
+
+int16_t encL, encR; // Encoders
+
+uint32_t buttons; // Button bitmask
+
+};
+
+
+
+#endif

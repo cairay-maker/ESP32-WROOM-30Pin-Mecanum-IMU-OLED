@@ -2,11 +2,10 @@
 
 MotionLogic::MotionLogic() {}
 
-// Note the return type uses MotionLogic:: to tell the compiler where the struct is
 MotionLogic::CalculatedSpeeds MotionLogic::process(const PacketData& joyData) {
     CalculatedSpeeds s = {0, 0, 0, 0};
 
-    // Mapping normalized float (-1.0 to 1.0) to your legacy 500-scale
+    // Mapping normalized float (-1.0 to 1.0) to 500-scale
     float rawX = joyData.rx * 500.0f; 
     float rawY = joyData.ry * 500.0f;
 
@@ -14,8 +13,9 @@ MotionLogic::CalculatedSpeeds MotionLogic::process(const PacketData& joyData) {
     if (abs(rawX) <= DEAD_ZONE) rawX = 0;
     if (abs(rawY) <= DEAD_ZONE) rawY = 0;
 
-    float x = rawX * SCALE;
-    float y = rawY * SCALE;
+    // --- INVERT X SIGN TO FIX FLIPPED LEFT/RIGHT STRAFING ---
+    float x =  rawX * SCALE;
+    float y =  rawY * SCALE;
 
     // INNER ZONE: Forward/Backward or Point Turns
     if (abs(rawX) <= INNER_ZONE_LIMIT && abs(rawY) <= INNER_ZONE_LIMIT) {
@@ -28,7 +28,7 @@ MotionLogic::CalculatedSpeeds MotionLogic::process(const PacketData& joyData) {
             s.fr = s.rr = (int)-x;
         }
     } 
-    // OUTER ZONE: Full Mecanum movement
+    // OUTER ZONE: Full Mecanum Strafe movement
     else {
         float rot = (abs(rawY) > DEAD_ZONE) ? 0 : x * 0.2f;
         s.fl = (int)(y + x + rot);

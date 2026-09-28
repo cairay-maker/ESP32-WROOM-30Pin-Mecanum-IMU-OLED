@@ -1,7 +1,7 @@
 #ifndef IMUREADER_H
 #define IMUREADER_H
 
-#include <Adafruit_MPU6050.h>
+#include <Adafruit_LSM6DS3.h>
 #include <Adafruit_Sensor.h>
 
 class IMUReader {
@@ -23,7 +23,7 @@ public:
     float getRawRoll() const  { return (atan2(ax, az) * 57.2958f) - rollOffset; }
 
 private:
-    Adafruit_MPU6050 mpu;
+    Adafruit_LSM6DS3 lsm;
     float pitch = 0, roll = 0;
     float filteredYawRate = 0; 
     unsigned long lastMicros;

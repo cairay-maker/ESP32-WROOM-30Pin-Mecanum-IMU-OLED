@@ -1,7 +1,7 @@
 #ifndef OLED_HANDLER_H
 #define OLED_HANDLER_H
 
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_SSD1327.h>
 #include <Adafruit_GFX.h>
 #include <Fonts/TomThumb.h> // The "50% scale" look font
 #include <Wire.h>
@@ -18,9 +18,9 @@ public:
     void drawCenteredText(const char* text, int y, int size);
 
 private:
-    Adafruit_SSD1306 display;
+    Adafruit_SSD1327 display = Adafruit_SSD1327(128, 128, &Wire);
     const int SCREEN_WIDTH = 128;
-    const int SCREEN_HEIGHT = 64;
+    const int SCREEN_HEIGHT = 128;
 };
 
 #endif

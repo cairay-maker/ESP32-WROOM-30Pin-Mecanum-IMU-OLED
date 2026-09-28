@@ -4,15 +4,7 @@
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
-
-// The exact data structure sent by your Controller
-typedef struct {
-    float lx, ly, rx, ry;    // Joysticks (-1.0 to 1.0)
-    float pL, pM, pR;        // Potentiometers
-    float roll, pitch, yaw;  // IMU Data
-    int16_t encL, encR;      // Encoders
-    uint32_t buttons;        // Button bitmask
-} PacketData;
+#include "PacketData.h"
 
 class ESPNowHandler {
 public:
